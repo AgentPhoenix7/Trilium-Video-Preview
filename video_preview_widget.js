@@ -7,14 +7,18 @@
  *
  * Workflow:
  *   1. Paste a video URL into a text note
- *   2. Click the 🎬 toolbar button — converts the URL to the storage format
+ *   2. Click the 🎬 toolbar button — converts URL(s) to storage format on the backend
  *   3. In read-only mode the widget auto-renders inline video players
- *   4. For file notes (MIME video/*) or notes with #videoPlayer label +
- *      video attachments, a dedicated player panel is shown instead
+ *   4. File notes (MIME video/*) and notes with #videoPlayer + video attachments
+ *      get a dedicated panel player below the note content
  *
- * Controls (native video):
- *   Play/Pause · Seek bar with buffered · Time · Speed · Volume · Mute · PiP · Fullscreen
- * Keyboard (click widget first): Space · ← → (±5 s) · ↑ ↓ (volume) · M (mute) · F (fullscreen)
+ * Native player controls:
+ *   Overlay controls (auto-hide) · Seek bar with buffered + hover tooltip · Time display
+ *   Loop · Speed · Volume (persisted) · Mute · PiP · Fullscreen
+ *   Click-to-play · Double-click fullscreen · Download (info bar)
+ *   Resume playback position per URL (persisted)
+ *
+ * Keyboard (focus player first): Space · ←/→ (±5s) · ↑/↓ (vol) · M (mute) · F (fs) · L (loop)
  *
  * Platforms: YouTube · Bilibili · Vimeo · Youku · Tencent Video · any direct URL
  *
@@ -22,20 +26,19 @@
  */
 
 /* ── constants ─────────────────────────────────────────────────────────── */
-const TVP_NATIVE = '#video-native';
-const TVP_IFRAME = '#video-iframe';
-const TVP_STYLE_ID = 'tvp-global-styles';
+const TVP_NATIVE    = '#video-native';
+const TVP_IFRAME    = '#video-iframe';
+const TVP_STYLE_ID  = 'tvp-global-styles';
+const TVP_LS_VOL    = 'tvp-vol';
+const TVP_LS_MUTED  = 'tvp-muted';
+const TVP_LS_POS    = 'tvp-pos-';   /* + base64(url) */
 
 const VIDEO_MIME_RE = /^video\//i;
 const VIDEO_EXT_RE  = /\.(mp4|webm|ogg|ogv|mov|m4v|mkv|avi|flv|3gp|m3u8)(\?.*)?$/i;
 
-/* ── helpers ────────────────────────────────────────────────────────────── */
-function esc(str) {
-    return String(str ?? '')
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
+const HIDE_DELAY = 3000; /* ms of inactivity before controls hide */
 
+/* ── helpers ────────────────────────────────────────────────────────────── */
 function fmtTime(s) {
     if (!isFinite(s) || s < 0) return '0:00';
     s = Math.floor(s);
@@ -45,42 +48,40 @@ function fmtTime(s) {
         : `${m}:${String(sec).padStart(2,'0')}`;
 }
 
-function isVideoMime(mime)  { return mime  && VIDEO_MIME_RE.test(mime); }
-function isVideoExt(title)  { return title && VIDEO_EXT_RE.test(title); }
+function isVideoMime(mime)  { return !!mime  && VIDEO_MIME_RE.test(mime); }
+function isVideoExt(title)  { return !!title && VIDEO_EXT_RE.test(title); }
+
+function lsGet(key, fallback = null) {
+    try { const v = localStorage.getItem(key); return v !== null ? v : fallback; } catch { return fallback; }
+}
+function lsSet(key, val) { try { localStorage.setItem(key, val); } catch {} }
+
+function posKey(url) {
+    try { return TVP_LS_POS + btoa(encodeURIComponent(url)).replace(/[^a-zA-Z0-9]/g, '_'); }
+    catch { return TVP_LS_POS + url.length; }
+}
 
 /* ── platform registry ─────────────────────────────────────────────────── */
 const PLATFORMS = [
     {
         name: 'YouTube', icon: '▶', cssClass: 'youtube',
         match: u => u.includes('youtube.com') || u.includes('youtu.be'),
-        embed: u => {
-            const m = u.match(/(?:v=|youtu\.be\/)([^&?#]+)/);
-            return m ? `https://www.youtube.com/embed/${m[1]}` : u;
-        }
+        embed: u => { const m = u.match(/(?:v=|youtu\.be\/)([^&?#]+)/); return m ? `https://www.youtube.com/embed/${m[1]}?rel=0` : u; }
     },
     {
         name: 'Bilibili', icon: '📺', cssClass: 'bilibili',
         match: u => u.includes('bilibili.com'),
-        embed: u => {
-            const m = u.match(/(BV[\w]+)/i);
-            return m ? `https://player.bilibili.com/player.html?bvid=${m[1]}&high_quality=1&autoplay=0` : u;
-        }
+        embed: u => { const m = u.match(/(BV[\w]+)/i); return m ? `https://player.bilibili.com/player.html?bvid=${m[1]}&high_quality=1&autoplay=0` : u; }
     },
     {
         name: 'Vimeo', icon: '🎬', cssClass: 'vimeo',
         match: u => u.includes('vimeo.com'),
-        embed: u => {
-            const m = u.match(/vimeo\.com\/(\d+)/);
-            return m ? `https://player.vimeo.com/video/${m[1]}` : u;
-        }
+        embed: u => { const m = u.match(/vimeo\.com\/(\d+)/); return m ? `https://player.vimeo.com/video/${m[1]}` : u; }
     },
     {
         name: 'Youku', icon: '🎯', cssClass: 'youku',
         match: u => u.includes('youku.com'),
-        embed: u => {
-            const m = u.match(/id_([^.]+)/);
-            return m ? `https://player.youku.com/embed/${m[1]}` : u;
-        }
+        embed: u => { const m = u.match(/id_([^.]+)/); return m ? `https://player.youku.com/embed/${m[1]}` : u; }
     },
     {
         name: 'Tencent', icon: '📹', cssClass: 'tencent',
@@ -99,261 +100,375 @@ const PLATFORMS = [
     }
 ];
 
-function detectPlatform(url) {
-    return PLATFORMS.find(p => p.match(url)) ?? { name: 'Video', icon: '🎬', cssClass: 'default', embed: u => u };
-}
+const DEFAULT_PLATFORM = { name: 'Video', icon: '🎬', cssClass: 'default', embed: u => u };
 
-/** Converts a user-facing URL to the appropriate storage format entry */
-function processUrl(rawUrl) {
-    const url = rawUrl.trim();
-    if (url.includes(TVP_NATIVE) || url.includes(TVP_IFRAME)) return null;
+function detectPlatform(url) { return PLATFORMS.find(p => p.match(url)) ?? DEFAULT_PLATFORM; }
 
-    // Direct video file
-    if (VIDEO_EXT_RE.test(url) || url.includes('localhost') || url.includes('127.0.0.1')) {
-        const filename = (() => {
-            try { return decodeURIComponent(url.split('/').pop().split('?')[0].split('#')[0]); }
-            catch { return 'video'; }
-        })();
-        return { type: 'native', url, title: filename || 'Local Video' };
-    }
-
-    // Known embed platforms
-    const platform = PLATFORMS.find(p => p.match(url) && p.cssClass !== 'local');
-    if (platform) {
-        const embedUrl = platform.embed(url);
-        return { type: 'iframe', url: embedUrl, title: `${platform.name} Video` };
-    }
-
-    return null;
-}
-
-/* ── global CSS (injected into <head> once) ────────────────────────────── */
+/* ── global CSS ─────────────────────────────────────────────────────────── */
 const GLOBAL_CSS = `
-/* ── edit-mode: video links look like buttons ── */
-a[href*="${TVP_NATIVE}"],
-a[href*="${TVP_IFRAME}"] {
+/* ── edit-mode: video links styled as pill buttons ── */
+a[href*="#video-native"],
+a[href*="#video-iframe"] {
     display: inline-flex !important;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 14px;
-    background: linear-gradient(135deg, #667eea, #764ba2);
+    align-items: center; gap: 7px;
+    padding: 9px 16px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     color: #fff !important;
     text-decoration: none !important;
-    border-radius: 8px;
-    font-weight: 500;
-    font-size: 13px;
-    margin: 4px 0;
-    box-shadow: 0 2px 8px rgba(102,126,234,.35);
-    transition: transform .15s, box-shadow .15s;
+    border-radius: 20px;
+    font-weight: 600; font-size: 13px;
+    margin: 5px 0;
+    box-shadow: 0 3px 12px rgba(102,126,234,.4);
+    transition: transform .15s, box-shadow .15s, filter .15s;
+    letter-spacing: .01em;
 }
-a[href*="${TVP_NATIVE}"]:hover,
-a[href*="${TVP_IFRAME}"]:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 14px rgba(102,126,234,.5);
+a[href*="#video-native"]:hover,
+a[href*="#video-iframe"]:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(102,126,234,.55);
+    filter: brightness(1.08);
 }
-a[href*="${TVP_NATIVE}"]::before { content: "🎬 "; }
-a[href*="${TVP_IFRAME}"]::before { content: "📺 "; }
+a[href*="#video-native"]::before { content: "🎬\\00a0"; }
+a[href*="#video-iframe"]::before { content: "📺\\00a0"; }
 
 /* ── toolbar button ── */
 .tvp-toolbar-btn.ribbon-tab-title-icon.bx::before { content: "\\e9a6"; }
-.tvp-toolbar-btn.tvp-loading::before { content: "\\e9f4"; animation: tvp-spin 1s linear infinite; display: inline-block; }
-.tvp-toolbar-btn.tvp-success::before { content: "\\ea52"; color: #4ade80; }
+.tvp-toolbar-btn.tvp-spin::before {
+    content: "\\e9f4";
+    animation: tvp-spin 1s linear infinite;
+    display: inline-block;
+}
+.tvp-toolbar-btn.tvp-ok::before { content: "\\ea52"; color: #4ade80; }
 @keyframes tvp-spin { to { transform: rotate(360deg); } }
 
-/* ── player container ── */
+/* ── player shell ── */
 .tvp-player {
     position: relative;
     width: 100%;
-    margin: 14px 0;
-    border-radius: 10px;
+    margin: 16px 0;
+    border-radius: 14px;
     overflow: hidden;
     background: #000;
-    box-shadow: 0 4px 20px rgba(0,0,0,.35);
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    box-shadow:
+        0 2px 4px rgba(0,0,0,.3),
+        0 8px 32px rgba(0,0,0,.5),
+        0 0 0 1px rgba(255,255,255,.06);
+    font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+    outline: none;
+}
+.tvp-player:focus-visible {
+    box-shadow:
+        0 2px 4px rgba(0,0,0,.3),
+        0 8px 32px rgba(0,0,0,.5),
+        0 0 0 2px #667eea;
 }
 
-/* ── video / iframe area ── */
+/* ── media area ── */
 .tvp-media-wrap {
     position: relative;
     width: 100%;
     aspect-ratio: 16 / 9;
-    background: #0a0a0a;
+    background: #080808;
     overflow: hidden;
+    cursor: pointer;
 }
 .tvp-media-wrap video,
 .tvp-media-wrap iframe {
     position: absolute; inset: 0;
     width: 100%; height: 100%;
-    border: 0;
-    outline: none;
+    border: 0; outline: none;
 }
 
-/* big-play overlay */
+/* ── big-play button ── */
 .tvp-big-play {
     position: absolute; inset: 0;
     display: flex; align-items: center; justify-content: center;
-    cursor: pointer;
-    z-index: 2;
-    transition: opacity .15s;
+    z-index: 5;
+    transition: opacity .2s;
+    pointer-events: none;
 }
-.tvp-big-play.tvp-gone { opacity: 0; pointer-events: none; }
-.tvp-big-play-icon {
-    width: 60px; height: 60px;
+.tvp-big-play.tvp-gone { opacity: 0; }
+.tvp-big-play-ring {
+    width: 72px; height: 72px;
     border-radius: 50%;
-    background: rgba(0,0,0,.55);
+    border: 2px solid rgba(255,255,255,.3);
     display: flex; align-items: center; justify-content: center;
-    color: #fff; font-size: 24px;
-    backdrop-filter: blur(3px);
-    transition: transform .12s;
+    backdrop-filter: blur(6px);
+    background: rgba(0,0,0,.45);
+    transition: transform .18s, border-color .18s, background .18s;
 }
-.tvp-big-play:hover .tvp-big-play-icon { transform: scale(1.12); }
+.tvp-media-wrap:hover .tvp-big-play-ring {
+    transform: scale(1.08);
+    border-color: rgba(255,255,255,.6);
+    background: rgba(0,0,0,.6);
+}
+.tvp-play-triangle {
+    width: 0; height: 0;
+    border-style: solid;
+    border-width: 13px 0 13px 22px;
+    border-color: transparent transparent transparent rgba(255,255,255,.95);
+    margin-left: 4px;
+}
 
-/* loading */
+/* ── loading ── */
 .tvp-loading {
     position: absolute; inset: 0;
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
-    gap: 10px; color: #fff; font-size: 13px;
-    z-index: 3; pointer-events: none;
+    gap: 12px; color: rgba(255,255,255,.7); font-size: 13px;
+    z-index: 6; pointer-events: none;
 }
 .tvp-spinner {
-    width: 36px; height: 36px;
-    border: 3px solid rgba(255,255,255,.2);
+    width: 38px; height: 38px;
+    border: 3px solid rgba(255,255,255,.12);
     border-top-color: #667eea;
     border-radius: 50%;
-    animation: tvp-spin 1s linear infinite;
+    animation: tvp-spin .9s linear infinite;
 }
 .tvp-player.tvp-loaded .tvp-loading { display: none; }
 
-/* error */
+/* ── error overlay ── */
 .tvp-error-overlay {
     position: absolute; inset: 0;
     display: none; flex-direction: column;
     align-items: center; justify-content: center;
-    gap: 8px; background: rgba(0,0,0,.88);
-    color: #f87171; z-index: 4;
+    gap: 10px; background: rgba(0,0,0,.88);
+    color: #f87171; font-size: 13px; z-index: 7;
 }
-.tvp-player.tvp-error .tvp-error-overlay  { display: flex; }
-.tvp-player.tvp-error .tvp-loading        { display: none; }
+.tvp-player.tvp-error .tvp-error-overlay { display: flex; }
+.tvp-player.tvp-error .tvp-loading      { display: none; }
+.tvp-err-icon { font-size: 36px; }
 .tvp-retry-btn {
-    margin-top: 6px; padding: 5px 14px;
-    background: #333; border: 1px solid #555;
-    color: #fff; border-radius: 6px; cursor: pointer; font-size: 12px;
+    margin-top: 4px; padding: 7px 18px;
+    background: rgba(255,255,255,.1);
+    border: 1px solid rgba(255,255,255,.18);
+    color: #fff; border-radius: 8px; cursor: pointer;
+    font-size: 12px; font-weight: 500;
+    transition: background .15s;
 }
-.tvp-retry-btn:hover { background: #444; }
+.tvp-retry-btn:hover { background: rgba(255,255,255,.18); }
 
-/* ── custom native controls ── */
-.tvp-controls {
-    background: linear-gradient(to bottom, rgba(0,0,0,.7), rgba(0,0,0,.9));
-    padding: 6px 10px 8px;
-    display: flex; flex-direction: column; gap: 5px;
+/* ── controls overlay ── */
+.tvp-overlay {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    padding: 48px 0 0;
+    z-index: 10;
+    transition: opacity .28s ease, transform .28s ease;
 }
+.tvp-overlay-grad {
+    position: absolute; inset: 0;
+    background: linear-gradient(to top,
+        rgba(0,0,0,.88) 0%,
+        rgba(0,0,0,.55) 55%,
+        transparent 100%
+    );
+    pointer-events: none;
+}
+/* auto-hide */
+.tvp-player.tvp-hide-ctrl .tvp-overlay {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(6px);
+}
+.tvp-player.tvp-hide-ctrl .tvp-big-play { opacity: 0; }
 
-/* seek/progress bar */
+/* ── seek / progress bar ── */
 .tvp-progress {
-    position: relative; height: 18px;
-    display: flex; align-items: center; cursor: pointer;
+    position: relative;
+    height: 22px;
+    display: flex; align-items: flex-end;
+    padding: 0 12px 4px;
+    cursor: pointer;
 }
 .tvp-track {
-    position: relative; width: 100%; height: 4px;
-    background: rgba(255,255,255,.25); border-radius: 2px;
-    overflow: hidden; transition: height .1s;
+    position: relative; width: 100%;
+    height: 3px; border-radius: 3px;
+    background: rgba(255,255,255,.22);
+    transition: height .15s;
+    overflow: visible;
 }
-.tvp-progress:hover .tvp-track { height: 7px; }
+.tvp-progress:hover .tvp-track { height: 5px; }
 .tvp-buf, .tvp-pos {
-    position: absolute; top: 0; left: 0; bottom: 0; border-radius: 2px;
+    position: absolute; top: 0; left: 0; bottom: 0; border-radius: 3px;
+    pointer-events: none;
 }
-.tvp-buf { background: rgba(255,255,255,.3); width: 0; }
-.tvp-pos { background: #667eea; width: 0; }
+.tvp-buf { background: rgba(255,255,255,.28); width: 0; }
+.tvp-pos {
+    background: linear-gradient(to right, #667eea, #a78bfa);
+    width: 0;
+    transition: width .08s linear;
+}
 .tvp-thumb {
-    position: absolute; top: 50%; left: 0;
-    transform: translate(-50%, -50%);
-    width: 13px; height: 13px; border-radius: 50%;
-    background: #667eea; opacity: 0; pointer-events: none;
-    transition: opacity .1s;
+    position: absolute;
+    bottom: 50%; left: 0;
+    transform: translate(-50%, 50%);
+    width: 14px; height: 14px; border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 0 0 3px rgba(167,139,250,.65), 0 2px 6px rgba(0,0,0,.4);
+    opacity: 0; pointer-events: none;
+    transition: opacity .15s, transform .15s;
 }
 .tvp-progress:hover .tvp-thumb { opacity: 1; }
+.tvp-progress:hover .tvp-thumb:hover { transform: translate(-50%, 50%) scale(1.15); }
 
-/* control bar row */
+/* hover time tooltip */
+.tvp-time-tip {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    transform: translateX(-50%);
+    background: rgba(10,10,10,.9);
+    border: 1px solid rgba(255,255,255,.12);
+    color: #fff; font-size: 11px; font-weight: 500;
+    padding: 4px 8px; border-radius: 6px;
+    white-space: nowrap; pointer-events: none;
+    opacity: 0;
+    backdrop-filter: blur(8px);
+    transition: opacity .1s;
+}
+.tvp-progress:hover .tvp-time-tip { opacity: 1; }
+
+/* ── control bar ── */
 .tvp-bar {
-    display: flex; align-items: center; gap: 5px;
+    display: flex; align-items: center;
+    gap: 2px; padding: 4px 10px 8px;
+    position: relative;
 }
 .tvp-btn {
     background: none; border: none; cursor: pointer;
-    color: rgba(255,255,255,.85); padding: 3px 6px;
-    border-radius: 4px; font-size: 14px; line-height: 1;
+    color: rgba(255,255,255,.82); padding: 5px 7px;
+    border-radius: 6px; font-size: 15px; line-height: 1;
     display: flex; align-items: center; flex-shrink: 0;
-    transition: background .12s, color .12s;
+    transition: background .12s, color .12s, transform .1s;
+    position: relative;
 }
-.tvp-btn:hover { background: rgba(255,255,255,.15); color: #fff; }
+.tvp-btn:hover {
+    background: rgba(255,255,255,.14);
+    color: #fff;
+    transform: scale(1.08);
+}
+.tvp-btn.tvp-active { color: #a78bfa; }
+.tvp-btn.tvp-active:hover { color: #c4b5fd; }
+
 .tvp-time {
-    font-size: 11px; color: rgba(255,255,255,.75);
-    font-variant-numeric: tabular-nums; white-space: nowrap;
+    font-size: 12px; font-weight: 500;
+    color: rgba(255,255,255,.82);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    padding: 0 4px;
 }
-.tvp-spacer { flex: 1; }
+.tvp-spacer { flex: 1; min-width: 0; }
+
 .tvp-speed {
-    background: rgba(255,255,255,.1); color: rgba(255,255,255,.85);
-    border: 1px solid rgba(255,255,255,.2); border-radius: 4px;
-    padding: 2px 5px; font-size: 11px; cursor: pointer;
+    background: rgba(255,255,255,.1);
+    color: rgba(255,255,255,.85);
+    border: 1px solid rgba(255,255,255,.18);
+    border-radius: 6px;
+    padding: 3px 6px; font-size: 11px; font-weight: 600;
+    cursor: pointer;
+    backdrop-filter: blur(4px);
+    transition: background .12s;
 }
-.tvp-volume-row { display: flex; align-items: center; gap: 4px; }
+.tvp-speed:hover { background: rgba(255,255,255,.18); }
+.tvp-speed option { background: #1a1a2e; color: #fff; }
+
+/* volume */
+.tvp-vol-row { display: flex; align-items: center; gap: 3px; }
 .tvp-vol {
     -webkit-appearance: none; appearance: none;
-    width: 64px; height: 3px; border-radius: 2px;
-    background: rgba(255,255,255,.3); outline: none; cursor: pointer;
-    accent-color: #667eea;
+    width: 68px; height: 3px; border-radius: 3px;
+    background: rgba(255,255,255,.25);
+    outline: none; cursor: pointer;
 }
 .tvp-vol::-webkit-slider-thumb {
     -webkit-appearance: none;
-    width: 11px; height: 11px; border-radius: 50%;
-    background: #667eea; cursor: pointer;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 4px rgba(0,0,0,.4);
+    cursor: pointer;
+    transition: transform .1s;
 }
+.tvp-vol::-webkit-slider-thumb:hover { transform: scale(1.2); }
 
 /* ── info bar ── */
 .tvp-info {
     display: flex; align-items: center;
-    gap: 8px; padding: 7px 12px;
-    background: linear-gradient(to right, #1a1a2e, #16213e);
-    border-top: 1px solid rgba(255,255,255,.08);
+    gap: 10px; padding: 9px 14px;
+    background: #0e0e1a;
+    border-top: 1px solid rgba(255,255,255,.06);
     min-width: 0;
 }
 .tvp-badge {
-    display: inline-flex; align-items: center; gap: 3px;
-    padding: 2px 7px; border-radius: 4px;
-    background: rgba(255,255,255,.1); font-size: 11px;
-    color: #aaa; flex-shrink: 0;
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 9px; border-radius: 20px;
+    background: rgba(255,255,255,.08);
+    font-size: 11px; font-weight: 600;
+    color: rgba(255,255,255,.55); flex-shrink: 0;
+    letter-spacing: .02em;
+    border: 1px solid rgba(255,255,255,.08);
 }
-.tvp-badge.youtube  { color: #ff4444; }
-.tvp-badge.bilibili { color: #00b5e5; }
-.tvp-badge.vimeo    { color: #1ab7ea; }
-.tvp-badge.local    { color: #4ade80; }
-.tvp-badge.tiktok   { color: #ee1d52; }
+.tvp-badge.youtube  { color: #f87171; border-color: rgba(248,113,113,.25); background: rgba(248,113,113,.08); }
+.tvp-badge.bilibili { color: #60d3f7; border-color: rgba(96,211,247,.25); background: rgba(96,211,247,.08); }
+.tvp-badge.vimeo    { color: #5ec5e5; border-color: rgba(94,197,229,.25); background: rgba(94,197,229,.08); }
+.tvp-badge.local    { color: #4ade80; border-color: rgba(74,222,128,.25); background: rgba(74,222,128,.08); }
+.tvp-badge.tiktok   { color: #f472b6; border-color: rgba(244,114,182,.25); background: rgba(244,114,182,.08); }
+.tvp-badge.default  { color: #a78bfa; border-color: rgba(167,139,250,.25); background: rgba(167,139,250,.08); }
+
 .tvp-title {
-    font-size: 12px; color: #ccc;
+    font-size: 12px; color: rgba(255,255,255,.55);
     overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; flex: 1; min-width: 0;
 }
-.tvp-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.tvp-actions { display: flex; gap: 5px; flex-shrink: 0; }
 .tvp-act {
-    padding: 3px 9px; background: rgba(255,255,255,.1);
-    border: none; border-radius: 4px; color: #aaa;
-    font-size: 11px; cursor: pointer; transition: all .15s;
+    padding: 4px 10px;
+    background: rgba(255,255,255,.07);
+    border: 1px solid rgba(255,255,255,.1);
+    border-radius: 6px; color: rgba(255,255,255,.55);
+    font-size: 11px; font-weight: 500; cursor: pointer;
+    transition: background .15s, color .15s, border-color .15s;
+    white-space: nowrap;
 }
-.tvp-act:hover { background: rgba(255,255,255,.2); color: #fff; }
+.tvp-act:hover {
+    background: rgba(255,255,255,.14);
+    border-color: rgba(255,255,255,.2);
+    color: rgba(255,255,255,.9);
+}
+.tvp-act.tvp-dl { color: rgba(74,222,128,.7); border-color: rgba(74,222,128,.2); background: rgba(74,222,128,.06); }
+.tvp-act.tvp-dl:hover { color: #4ade80; background: rgba(74,222,128,.12); border-color: rgba(74,222,128,.35); }
 
-/* ── attachment panel (file notes / #videoPlayer) ── */
+/* ── resume bar ── */
+.tvp-resume-bar {
+    display: none;
+    align-items: center; gap: 10px;
+    padding: 8px 14px;
+    background: rgba(102,126,234,.12);
+    border-top: 1px solid rgba(102,126,234,.2);
+    font-size: 12px; color: rgba(255,255,255,.75);
+}
+.tvp-resume-bar.tvp-show { display: flex; }
+.tvp-resume-yes, .tvp-resume-no {
+    padding: 3px 10px;
+    border-radius: 5px; border: none; cursor: pointer;
+    font-size: 11px; font-weight: 600;
+}
+.tvp-resume-yes { background: #667eea; color: #fff; }
+.tvp-resume-yes:hover { background: #7c8ef0; }
+.tvp-resume-no  { background: rgba(255,255,255,.1); color: rgba(255,255,255,.6); }
+.tvp-resume-no:hover  { background: rgba(255,255,255,.16); color: rgba(255,255,255,.9); }
+
+/* ── attachment panel ── */
 .tvp-attach-panel { contain: none; }
 .tvp-attach-hidden { display: none; }
 .tvp-src-bar {
     display: flex; align-items: center; gap: 8px;
-    padding: 6px 0 4px; flex-wrap: wrap;
+    padding: 8px 0 6px; flex-wrap: wrap;
     font-size: 13px; color: var(--main-text-color, #ccc);
 }
 .tvp-src-bar select {
-    flex: 1; min-width: 0; padding: 4px 6px;
+    flex: 1; min-width: 0; padding: 5px 8px;
     border: 1px solid var(--main-border-color, #444);
-    border-radius: 4px;
-    background: var(--input-background-color, #222);
+    border-radius: 6px;
+    background: var(--input-background-color, #1a1a2e);
     color: var(--input-text-color, #eee); font-size: 13px;
 }
 `;
@@ -363,52 +478,25 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
     static get parentWidget() { return 'center-pane'; }
     get position() { return 90; }
 
-    /* No isEnabled() override → runs on all notes for toolbar + inline rendering.
-       The attachment panel is conditionally shown inside refreshWithNote. */
-
     /* ── render ── */
     doRender() {
-        /* Inject global CSS into <head> once */
         if (!document.getElementById(TVP_STYLE_ID)) {
             const s = document.createElement('style');
             s.id = TVP_STYLE_ID;
             s.textContent = GLOBAL_CSS;
             document.head.appendChild(s);
         }
-
-        this.$widget = $('<div class="tvp-attach-panel tvp-attach-hidden">');
-        this._bindAttachKeys();
+        this.$widget = $('<div class="tvp-attach-panel tvp-attach-hidden" tabindex="0">');
         return this.$widget;
-    }
-
-    _bindAttachKeys() {
-        this.$widget[0].setAttribute('tabindex', '0');
-        this.$widget[0].addEventListener('keydown', e => {
-            const v = this.$widget.find('video')[0];
-            if (!v || !v.src) return;
-            if (['SELECT','INPUT'].includes(e.target.tagName)) return;
-            switch (e.code) {
-                case 'Space':      e.preventDefault(); v.paused ? v.play() : v.pause(); break;
-                case 'ArrowRight': e.preventDefault(); v.currentTime = Math.min(v.duration, v.currentTime + 5); break;
-                case 'ArrowLeft':  e.preventDefault(); v.currentTime = Math.max(0, v.currentTime - 5); break;
-                case 'ArrowUp':    e.preventDefault(); v.volume = Math.min(1, v.volume + 0.1); break;
-                case 'ArrowDown':  e.preventDefault(); v.volume = Math.max(0, v.volume - 0.1); break;
-                case 'KeyM':       v.muted = !v.muted; break;
-                case 'KeyF':       this._toggleFs(this.$widget.find('.tvp-player')[0]); break;
-            }
-        });
     }
 
     /* ── refresh ── */
     async refreshWithNote(note) {
-        /* Inline rendering + toolbar run on a short delay to let Trilium's
-           DOM settle after note switch */
         setTimeout(() => {
             this._addToolbarButton();
             this._renderInlineVideos();
             this._startObserver();
         }, 250);
-
         await this._refreshAttachPanel(note);
     }
 
@@ -417,9 +505,9 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
         this.$widget.empty().addClass('tvp-attach-hidden');
 
         if (note.type === 'file' && isVideoMime(note.mime)) {
-            this.$widget.removeClass('tvp-attach-hidden').append(
-                this._buildNativePlayer(`/api/notes/${note.noteId}/download`, note.title, 'local')
-            );
+            const url = `/api/notes/${note.noteId}/download`;
+            this.$widget.removeClass('tvp-attach-hidden')
+                .append(this._buildNativePlayer(url, note.title, true));
             return;
         }
 
@@ -437,19 +525,19 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
             );
             const $slot = $('<div>');
             this.$widget
-                .append($('<div class="tvp-src-bar">').append('<label>Video: </label>', $sel))
+                .append($('<div class="tvp-src-bar">').append($('<label>').text('Video: '), $sel))
                 .append($slot);
 
             const load = () => {
-                const opt = $sel.find(':selected');
-                $slot.empty().append(this._buildNativePlayer($sel.val(), opt.text(), 'local'));
+                const url = $sel.val(), title = $sel.find(':selected').text();
+                $slot.empty().append(this._buildNativePlayer(url, title, true));
             };
             $sel.on('change', load);
             load();
         } else {
             const a = videos[0];
             this.$widget.append(
-                this._buildNativePlayer(`/api/attachments/${a.attachmentId}/download`, a.title, 'local')
+                this._buildNativePlayer(`/api/attachments/${a.attachmentId}/download`, a.title, true)
             );
         }
     }
@@ -472,7 +560,7 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
             const plat   = detectPlatform(url);
 
             const player = native
-                ? this._buildNativePlayer(url, title, plat.cssClass)
+                ? this._buildNativePlayer(url, title, true)
                 : this._buildIframePlayer(url, title, plat);
 
             link.style.display = 'none';
@@ -490,106 +578,197 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
     }
 
     /* ── build native <video> player ── */
-    _buildNativePlayer(url, title, platClass) {
-        const el = document.createElement('div');
-        el.className = 'tvp-player';
+    _buildNativePlayer(url, title, isDownloadable) {
+        const plat = detectPlatform(url);
+        const el   = this._el('div', 'tvp-player');
+        el.setAttribute('tabindex', '0');
 
-        /* media wrap */
+        /* ── media wrap ── */
         const mediaWrap = this._el('div', 'tvp-media-wrap');
-        const video = this._el('video');
-        video.src = url;
+        const video     = this._el('video');
+        video.src     = url;
         video.preload = 'metadata';
         video.setAttribute('playsinline', '');
 
+        /* big-play */
         const bigPlay = this._el('div', 'tvp-big-play');
-        bigPlay.innerHTML = '<div class="tvp-big-play-icon">&#9654;</div>';
+        const ring    = this._el('div', 'tvp-big-play-ring');
+        ring.append(this._el('div', 'tvp-play-triangle'));
+        bigPlay.appendChild(ring);
 
+        /* loading */
         const loading = this._el('div', 'tvp-loading');
-        loading.innerHTML = '<div class="tvp-spinner"></div><span>Loading…</span>';
+        const spinner = this._el('div', 'tvp-spinner');
+        const loadTxt = this._el('span');
+        loadTxt.textContent = 'Loading…';
+        loading.append(spinner, loadTxt);
 
-        const errOverlay = this._el('div', 'tvp-error-overlay');
-        const errMsg = this._el('span');
+        /* error */
+        const errWrap  = this._el('div', 'tvp-error-overlay');
+        const errIcon  = this._el('div', 'tvp-err-icon');
+        errIcon.textContent = '⚠️';
+        const errMsg   = this._el('span');
         errMsg.textContent = 'Failed to load video';
         const retryBtn = this._el('button', 'tvp-retry-btn');
         retryBtn.textContent = 'Retry';
-        errOverlay.append('⚠️ ', errMsg, document.createElement('br'), retryBtn);
+        errWrap.append(errIcon, errMsg, retryBtn);
 
-        mediaWrap.append(video, bigPlay, loading, errOverlay);
+        /* controls overlay */
+        const overlay  = this._el('div', 'tvp-overlay');
+        const overlayGrad = this._el('div', 'tvp-overlay-grad');
+        const { progressEl, timeEl, syncProgress } = this._buildProgressBar(video, el);
+        const { bar, syncPlay, syncMute, syncLoop }  = this._buildControlBar(video, el, timeEl, syncProgress);
+        overlay.append(overlayGrad, progressEl, bar);
 
-        /* custom controls */
-        const controls = this._buildControls(video, el, url);
+        mediaWrap.append(video, bigPlay, loading, errWrap, overlay);
 
         /* info bar */
-        const info = this._buildInfoBar(title, platClass, detectPlatform(url), url);
+        const info = this._buildInfoBar(title, plat, url, isDownloadable);
 
-        el.append(mediaWrap, controls, info);
+        /* resume bar */
+        const resumeBar = this._buildResumeBar(video, url, el);
 
-        /* events */
-        video.addEventListener('loadeddata',  () => el.classList.add('tvp-loaded'));
-        video.addEventListener('error',       () => { el.classList.add('tvp-error'); errMsg.textContent = video.error?.message || 'Failed to load video'; });
-        bigPlay.addEventListener('click',     () => video.paused ? video.play() : video.pause());
-        video.addEventListener('play',        () => { bigPlay.classList.add('tvp-gone'); el.querySelector('.tvp-play-btn').innerHTML = '&#10074;&#10074;'; });
-        video.addEventListener('pause',       () => { bigPlay.classList.remove('tvp-gone'); el.querySelector('.tvp-play-btn').innerHTML = '&#9654;'; });
-        video.addEventListener('ended',       () => bigPlay.classList.remove('tvp-gone'));
-        video.addEventListener('dblclick',    () => this._toggleFs(el));
-        retryBtn.addEventListener('click',    () => { el.classList.remove('tvp-error', 'tvp-loaded'); video.load(); });
+        el.append(mediaWrap, info, resumeBar);
+
+        /* ── wire events ── */
+        video.addEventListener('loadeddata',   () => el.classList.add('tvp-loaded'));
+        video.addEventListener('error',        () => {
+            el.classList.add('tvp-error');
+            errMsg.textContent = video.error?.message || 'Failed to load video';
+        });
+        video.addEventListener('play',  () => { bigPlay.classList.add('tvp-gone'); syncPlay(true); });
+        video.addEventListener('pause', () => { bigPlay.classList.remove('tvp-gone'); syncPlay(false); });
+        video.addEventListener('ended', () => { bigPlay.classList.remove('tvp-gone'); syncPlay(false); });
+        retryBtn.addEventListener('click', () => {
+            el.classList.remove('tvp-error', 'tvp-loaded');
+            video.load();
+        });
+
+        /* click-to-play / double-click fullscreen */
+        let clickTimer = null;
+        mediaWrap.addEventListener('click', e => {
+            if (e.target.closest('.tvp-overlay')) return;
+            clearTimeout(clickTimer);
+            clickTimer = setTimeout(() => { video.paused ? video.play() : video.pause(); }, 200);
+        });
+        mediaWrap.addEventListener('dblclick', e => {
+            if (e.target.closest('.tvp-overlay')) return;
+            clearTimeout(clickTimer);
+            this._toggleFs(el);
+        });
+
+        /* auto-hide */
+        this._setupAutoHide(video, el);
+
+        /* volume persistence */
+        this._setupVolumePersistence(video, el, syncMute);
+
+        /* keyboard */
+        el.addEventListener('keydown', e => {
+            if (['SELECT','INPUT'].includes(e.target.tagName)) return;
+            switch (e.code) {
+                case 'Space':      e.preventDefault(); video.paused ? video.play() : video.pause(); break;
+                case 'ArrowRight': e.preventDefault(); video.currentTime = Math.min(video.duration || 0, video.currentTime + 5); break;
+                case 'ArrowLeft':  e.preventDefault(); video.currentTime = Math.max(0, video.currentTime - 5); break;
+                case 'ArrowUp':    e.preventDefault(); video.volume = Math.min(1, +(video.volume + 0.1).toFixed(2)); syncMute(); break;
+                case 'ArrowDown':  e.preventDefault(); video.volume = Math.max(0, +(video.volume - 0.1).toFixed(2)); syncMute(); break;
+                case 'KeyM':       video.muted = !video.muted; syncMute(); break;
+                case 'KeyF':       this._toggleFs(el); break;
+                case 'KeyL':       video.loop = !video.loop; syncLoop(); break;
+            }
+        });
+
+        document.addEventListener('fullscreenchange', () => {
+            const fsBtn = el.querySelector('.tvp-fs-btn');
+            if (fsBtn) fsBtn.innerHTML = document.fullscreenElement === el ? '&#x2715;' : '&#x26F6;';
+        });
 
         return el;
     }
 
-    _buildControls(video, playerEl, url) {
-        const controls = this._el('div', 'tvp-controls');
-
-        /* seek row */
-        const progress = this._el('div', 'tvp-progress');
-        const track    = this._el('div', 'tvp-track');
-        const buf      = this._el('div', 'tvp-buf');
-        const pos      = this._el('div', 'tvp-pos');
-        const thumb    = this._el('div', 'tvp-thumb');
+    /* ── progress bar ── */
+    _buildProgressBar(video, playerEl) {
+        const progressEl = this._el('div', 'tvp-progress');
+        const track      = this._el('div', 'tvp-track');
+        const buf        = this._el('div', 'tvp-buf');
+        const pos        = this._el('div', 'tvp-pos');
+        const thumb      = this._el('div', 'tvp-thumb');
+        const timeTip    = this._el('div', 'tvp-time-tip');
+        const timeEl     = this._el('span'); /* shared with control bar */
         track.append(buf, pos);
-        progress.append(track, thumb);
+        progressEl.append(track, thumb, timeTip);
 
-        const seekFrac = e => {
-            const r = progress.getBoundingClientRect();
+        const getX = e => {
+            const r = progressEl.getBoundingClientRect();
             return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
         };
-        const seek = e => { if (isFinite(video.duration)) video.currentTime = seekFrac(e) * video.duration; };
+        const seekTo = e => {
+            if (isFinite(video.duration)) video.currentTime = getX(e) * video.duration;
+        };
 
-        progress.addEventListener('click', seek);
-        progress.addEventListener('mousedown', e => {
-            let dragging = true;
-            const mv = ev => { if (dragging) seek(ev); };
-            const up = ()  => { dragging = false; document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); };
+        progressEl.addEventListener('mousemove', e => {
+            const frac = getX(e);
+            timeTip.textContent = fmtTime((video.duration || 0) * frac);
+            timeTip.style.left  = (frac * 100) + '%';
+        });
+        progressEl.addEventListener('click', seekTo);
+        progressEl.addEventListener('mousedown', e => {
+            let down = true;
+            const mv = ev => { if (down) seekTo(ev); };
+            const up = ()  => { down = false; document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); };
             document.addEventListener('mousemove', mv);
             document.addEventListener('mouseup', up);
-            seek(e);
+            seekTo(e);
         });
 
-        video.addEventListener('timeupdate', () => {
+        const syncProgress = () => {
             const pct = video.duration ? (video.currentTime / video.duration) * 100 : 0;
-            pos.style.width   = pct + '%';
-            thumb.style.left  = pct + '%';
-            timeEl.textContent = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
-        });
-        video.addEventListener('progress', () => {
+            pos.style.width  = pct + '%';
+            thumb.style.left = pct + '%';
             if (video.buffered.length) {
                 buf.style.width = (video.buffered.end(video.buffered.length - 1) / video.duration * 100) + '%';
             }
+        };
+
+        video.addEventListener('timeupdate', syncProgress);
+        video.addEventListener('progress',   syncProgress);
+        video.addEventListener('timeupdate', () => {
+            const t = `${fmtTime(video.currentTime)} / ${fmtTime(video.duration)}`;
+            timeEl.textContent = t;
+        });
+        video.addEventListener('loadedmetadata', () => {
+            timeEl.textContent = `0:00 / ${fmtTime(video.duration)}`;
         });
 
-        /* control bar */
+        return { progressEl, timeEl, syncProgress };
+    }
+
+    /* ── control bar ── */
+    _buildControlBar(video, playerEl, timeEl, syncProgress) {
         const bar = this._el('div', 'tvp-bar');
 
+        /* play/pause */
         const playBtn = this._el('button', 'tvp-btn tvp-play-btn');
-        playBtn.innerHTML = '&#9654;';
         playBtn.title = 'Play / Pause (Space)';
+        playBtn.innerHTML = '&#9654;';
         playBtn.addEventListener('click', () => video.paused ? video.play() : video.pause());
+        const syncPlay = playing => { playBtn.innerHTML = playing ? '&#10074;&#10074;' : '&#9654;'; };
 
-        const timeEl = this._el('span', 'tvp-time');
+        /* time */
+        timeEl.className = 'tvp-time';
         timeEl.textContent = '0:00 / 0:00';
 
+        /* loop */
+        const loopBtn = this._el('button', 'tvp-btn');
+        loopBtn.title = 'Loop (L)';
+        loopBtn.innerHTML = '&#8635;';
+        const syncLoop = () => loopBtn.classList.toggle('tvp-active', video.loop);
+        loopBtn.addEventListener('click', () => { video.loop = !video.loop; syncLoop(); });
+
+        /* spacer */
         const spacer = this._el('div', 'tvp-spacer');
 
+        /* speed */
         const speed = this._el('select', 'tvp-speed');
         speed.title = 'Playback speed';
         [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3].forEach(v => {
@@ -600,109 +779,149 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
         });
         speed.addEventListener('change', () => { video.playbackRate = +speed.value; });
 
-        const volRow  = this._el('div', 'tvp-volume-row');
-        const muteBtn = this._el('button', 'tvp-btn');
-        muteBtn.innerHTML = '&#128266;';
-        muteBtn.title = 'Mute (M)';
+        /* volume */
+        const volRow    = this._el('div', 'tvp-vol-row');
+        const muteBtn   = this._el('button', 'tvp-btn');
+        muteBtn.title   = 'Mute (M)';
         const volSlider = this._el('input', 'tvp-vol');
-        volSlider.type = 'range'; volSlider.min = 0; volSlider.max = 1;
-        volSlider.step = 0.05; volSlider.value = 1; volSlider.title = 'Volume (↑/↓)';
+        volSlider.type  = 'range'; volSlider.min = 0; volSlider.max = 1;
+        volSlider.step  = 0.02; volSlider.value = 1;
+        volSlider.title = 'Volume (↑/↓)';
 
         const syncMute = () => {
             const muted = video.muted || video.volume === 0;
-            muteBtn.innerHTML = muted ? '&#128263;' : (video.volume < 0.5 ? '&#128264;' : '&#128266;');
-            if (!video.muted) volSlider.value = video.volume;
+            muteBtn.innerHTML = muted ? '&#128263;' : video.volume < 0.5 ? '&#128264;' : '&#128266;';
+            const pct = muted ? 0 : video.volume * 100;
+            volSlider.value = muted ? 0 : video.volume;
+            volSlider.style.background =
+                `linear-gradient(to right, #a78bfa ${pct}%, rgba(255,255,255,.22) ${pct}%)`;
+            lsSet(TVP_LS_VOL,   String(video.volume));
+            lsSet(TVP_LS_MUTED, String(video.muted));
         };
         muteBtn.addEventListener('click', () => { video.muted = !video.muted; syncMute(); });
-        volSlider.addEventListener('input', () => { video.volume = +volSlider.value; video.muted = false; syncMute(); });
+        volSlider.addEventListener('input', () => {
+            video.volume = +volSlider.value;
+            video.muted  = video.volume === 0;
+            syncMute();
+        });
         video.addEventListener('volumechange', syncMute);
-
         volRow.append(muteBtn, volSlider);
 
+        /* PiP */
         const pipBtn = this._el('button', 'tvp-btn');
-        pipBtn.innerHTML = '&#10697;'; pipBtn.title = 'Picture-in-Picture';
+        pipBtn.title = 'Picture-in-Picture';
+        pipBtn.innerHTML = '&#10697;';
         if (!document.pictureInPictureEnabled) pipBtn.style.display = 'none';
         pipBtn.addEventListener('click', () => {
-            document.pictureInPictureElement
-                ? document.exitPictureInPicture().catch(() => {})
-                : video.requestPictureInPicture().catch(() => {});
+            (document.pictureInPictureElement
+                ? document.exitPictureInPicture()
+                : video.requestPictureInPicture()
+            ).catch(() => {});
         });
 
-        const fsBtn = this._el('button', 'tvp-btn');
-        fsBtn.innerHTML = '&#x26F6;'; fsBtn.title = 'Fullscreen (F)';
+        /* fullscreen */
+        const fsBtn = this._el('button', 'tvp-btn tvp-fs-btn');
+        fsBtn.title = 'Fullscreen (F)';
+        fsBtn.innerHTML = '&#x26F6;';
         fsBtn.addEventListener('click', () => this._toggleFs(playerEl));
-        document.addEventListener('fullscreenchange', () => {
-            fsBtn.innerHTML = document.fullscreenElement === playerEl ? '&#x2716;' : '&#x26F6;';
-        });
 
-        /* keyboard (on player element) */
-        playerEl.setAttribute('tabindex', '0');
-        playerEl.addEventListener('keydown', e => {
-            if (['SELECT','INPUT'].includes(e.target.tagName)) return;
-            switch (e.code) {
-                case 'Space':      e.preventDefault(); video.paused ? video.play() : video.pause(); break;
-                case 'ArrowRight': e.preventDefault(); video.currentTime = Math.min(video.duration||0, video.currentTime + 5); break;
-                case 'ArrowLeft':  e.preventDefault(); video.currentTime = Math.max(0, video.currentTime - 5); break;
-                case 'ArrowUp':    e.preventDefault(); video.volume = Math.min(1, video.volume + 0.1); syncMute(); break;
-                case 'ArrowDown':  e.preventDefault(); video.volume = Math.max(0, video.volume - 0.1); syncMute(); break;
-                case 'KeyM':       video.muted = !video.muted; syncMute(); break;
-                case 'KeyF':       this._toggleFs(playerEl); break;
+        bar.append(playBtn, timeEl, loopBtn, spacer, speed, volRow, pipBtn, fsBtn);
+        return { bar, syncPlay, syncMute, syncLoop };
+    }
+
+    /* ── resume bar ── */
+    _buildResumeBar(video, url, playerEl) {
+        const bar     = this._el('div', 'tvp-resume-bar');
+        const msg     = this._el('span');
+        const yesBtn  = this._el('button', 'tvp-resume-yes');
+        const noBtn   = this._el('button', 'tvp-resume-no');
+        yesBtn.textContent = 'Resume';
+        noBtn.textContent  = 'Start over';
+        bar.append(msg, yesBtn, noBtn);
+
+        const hide = () => bar.classList.remove('tvp-show');
+
+        video.addEventListener('loadedmetadata', () => {
+            const saved = parseFloat(lsGet(posKey(url), '0'));
+            if (saved > 10 && isFinite(video.duration) && saved < video.duration - 5) {
+                msg.textContent = `Resume from ${fmtTime(saved)}?`;
+                bar.classList.add('tvp-show');
             }
         });
 
-        bar.append(playBtn, timeEl, spacer, speed, volRow, pipBtn, fsBtn);
-        controls.append(progress, bar);
-        return controls;
-    }
+        yesBtn.addEventListener('click', () => {
+            const saved = parseFloat(lsGet(posKey(url), '0'));
+            if (saved > 0) video.currentTime = saved;
+            hide();
+            video.play();
+        });
+        noBtn.addEventListener('click', () => { video.currentTime = 0; hide(); });
 
-    /* ── build iframe player ── */
-    _buildIframePlayer(url, title, platform) {
-        const el = document.createElement('div');
-        el.className = 'tvp-player';
-
-        const mediaWrap = this._el('div', 'tvp-media-wrap');
-
-        const loading = this._el('div', 'tvp-loading');
-        loading.innerHTML = '<div class="tvp-spinner"></div><span>Loading…</span>';
-
-        const errOverlay = this._el('div', 'tvp-error-overlay');
-        errOverlay.innerHTML = '⚠️ <span>Failed to load embed</span>';
-        const retryBtn = this._el('button', 'tvp-retry-btn');
-        retryBtn.textContent = 'Retry';
-        errOverlay.appendChild(retryBtn);
-
-        const iframe = this._el('iframe');
-        iframe.src = url;
-        iframe.allowFullscreen = true;
-        iframe.allow = 'autoplay; fullscreen; picture-in-picture; encrypted-media';
-
-        iframe.addEventListener('load', () => el.classList.add('tvp-loaded'));
-        /* iframes don't fire error reliably; timeout fallback */
-        setTimeout(() => { if (!el.classList.contains('tvp-loaded')) el.classList.add('tvp-loaded'); }, 4000);
-
-        retryBtn.addEventListener('click', () => {
-            el.classList.remove('tvp-error', 'tvp-loaded');
-            iframe.src = url;
+        /* save position on timeupdate (throttled) and pause */
+        let saveTimer = null;
+        video.addEventListener('timeupdate', () => {
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(() => {
+                if (video.currentTime > 5) lsSet(posKey(url), String(video.currentTime));
+            }, 5000);
+        });
+        video.addEventListener('pause', () => {
+            if (video.currentTime > 5) lsSet(posKey(url), String(video.currentTime));
         });
 
-        mediaWrap.append(loading, errOverlay, iframe);
+        return bar;
+    }
 
-        const info = this._buildInfoBar(title, platform.cssClass, platform, url);
-        el.append(mediaWrap, info);
-        return el;
+    /* ── auto-hide controls ── */
+    _setupAutoHide(video, playerEl) {
+        let timer = null;
+        const show = () => {
+            playerEl.classList.remove('tvp-hide-ctrl');
+            clearTimeout(timer);
+        };
+        const schedHide = () => {
+            clearTimeout(timer);
+            if (!video.paused) timer = setTimeout(() => playerEl.classList.add('tvp-hide-ctrl'), HIDE_DELAY);
+        };
+
+        playerEl.addEventListener('mousemove',  () => { show(); schedHide(); });
+        playerEl.addEventListener('mouseleave', () => schedHide());
+        playerEl.addEventListener('mouseenter', () => show());
+        video.addEventListener('play',  schedHide);
+        video.addEventListener('pause', show);
+    }
+
+    /* ── volume persistence ── */
+    _setupVolumePersistence(video, playerEl, syncMute) {
+        video.addEventListener('loadedmetadata', () => {
+            const savedVol   = parseFloat(lsGet(TVP_LS_VOL,   '1'));
+            const savedMuted = lsGet(TVP_LS_MUTED, 'false') === 'true';
+            video.volume = isFinite(savedVol) ? Math.max(0, Math.min(1, savedVol)) : 1;
+            video.muted  = savedMuted;
+            syncMute();
+        }, { once: true });
     }
 
     /* ── info bar ── */
-    _buildInfoBar(title, platClass, platform, url) {
-        const info  = this._el('div', 'tvp-info');
-        const badge = this._el('span', `tvp-badge ${platClass}`);
+    _buildInfoBar(title, platform, url, isDownloadable) {
+        const info    = this._el('div', 'tvp-info');
+        const badge   = this._el('span', `tvp-badge ${platform.cssClass}`);
         badge.textContent = `${platform.icon} ${platform.name}`;
 
         const titleEl = this._el('span', 'tvp-title');
-        titleEl.textContent = title;        /* textContent = safe, no XSS */
+        titleEl.textContent = title;
         titleEl.title = title;
 
         const actions = this._el('div', 'tvp-actions');
+
+        if (isDownloadable) {
+            const dlBtn  = this._el('a', 'tvp-act tvp-dl');
+            dlBtn.href     = url;
+            dlBtn.download = '';
+            dlBtn.textContent = '⬇ Download';
+            dlBtn.addEventListener('click', e => e.stopPropagation());
+            actions.appendChild(dlBtn);
+        }
 
         const copyBtn = this._el('button', 'tvp-act');
         copyBtn.textContent = '📋 Copy';
@@ -722,6 +941,40 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
         return info;
     }
 
+    /* ── iframe player ── */
+    _buildIframePlayer(url, title, platform) {
+        const el        = this._el('div', 'tvp-player');
+        const mediaWrap = this._el('div', 'tvp-media-wrap');
+
+        const loading = this._el('div', 'tvp-loading');
+        loading.append(this._el('div', 'tvp-spinner'), (() => { const s = this._el('span'); s.textContent = 'Loading…'; return s; })());
+
+        const errWrap  = this._el('div', 'tvp-error-overlay');
+        const errIcon  = this._el('div', 'tvp-err-icon');
+        errIcon.textContent = '⚠️';
+        const errTxt   = this._el('span'); errTxt.textContent = 'Failed to load embed';
+        const retryBtn = this._el('button', 'tvp-retry-btn');
+        retryBtn.textContent = 'Retry';
+        errWrap.append(errIcon, errTxt, retryBtn);
+
+        const iframe = this._el('iframe');
+        iframe.src           = url;
+        iframe.allowFullscreen = true;
+        iframe.allow         = 'autoplay; fullscreen; picture-in-picture; encrypted-media';
+
+        iframe.addEventListener('load', () => el.classList.add('tvp-loaded'));
+        setTimeout(() => { if (!el.classList.contains('tvp-loaded')) el.classList.add('tvp-loaded'); }, 4000);
+        retryBtn.addEventListener('click', () => {
+            el.classList.remove('tvp-error', 'tvp-loaded');
+            iframe.src = url;
+        });
+
+        mediaWrap.append(loading, errWrap, iframe);
+        const info = this._buildInfoBar(title, platform, url, false);
+        el.append(mediaWrap, info);
+        return el;
+    }
+
     /* ── toolbar button ── */
     _addToolbarButton() {
         const $ribbon = $("div.component.note-split:not(.hidden-ext) div.ribbon-tab-title").parent();
@@ -729,10 +982,10 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
 
         if (!$ribbon.find('.tvp-toolbar-wrap').length) {
             const $last = $ribbon.find('.ribbon-tab-title:not(.backToHis)').last();
-            const html = `<div class="tvp-toolbar-wrap ribbon-tab-title">
-                <span class="tvp-toolbar-btn ribbon-tab-title-icon bx" title="Embed video links (🎬)"></span>
+            const html  = `<div class="tvp-toolbar-wrap ribbon-tab-title">
+                <span class="tvp-toolbar-btn ribbon-tab-title-icon bx" title="Embed video (🎬)"></span>
             </div>`;
-            ($last.length ? $last : $ribbon).before ? $last.before(html) : $ribbon.append(html);
+            if ($last.length) $last.before(html); else $ribbon.append(html);
         }
 
         $ribbon.find('.tvp-toolbar-wrap')
@@ -746,7 +999,7 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
         if (!note) return;
 
         const $icon = $('.tvp-toolbar-btn');
-        $icon.addClass('tvp-loading');
+        $icon.addClass('tvp-spin');
         api.showMessage('🔄 Converting video links…');
 
         try {
@@ -756,16 +1009,16 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
 
                 let html = await note.getContent();
                 const orig = html;
-                let count = 0;
+                let count  = 0;
 
                 const makeLink = (url, title, type) => {
-                    const hash   = type === 'native' ? '#video-native' : '#video-iframe';
-                    const safeU  = url.replace(/"/g, '%22');
-                    const safeT  = (title || 'Video').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    const hash  = type === 'native' ? '#video-native' : '#video-iframe';
+                    const safeU = url.replace(/"/g, '%22');
+                    const safeT = (title || 'Video').replace(/</g, '&lt;').replace(/>/g, '&gt;');
                     return `<p><a href="${safeU}${hash}">${safeT}</a></p>`;
                 };
 
-                const classify = (url) => {
+                const classify = url => {
                     url = url.trim();
                     if (url.includes('#video-native') || url.includes('#video-iframe')) return null;
 
@@ -774,10 +1027,9 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
                         const fn = (() => { try { return decodeURIComponent(url.split('/').pop().split('?')[0].split('#')[0]); } catch { return 'Video'; } })();
                         return { type: 'native', url, title: fn || 'Local Video' };
                     }
-
                     if (url.includes('youtube.com') || url.includes('youtu.be')) {
                         const m = url.match(/(?:v=|youtu\.be\/)([^&?#]+)/);
-                        if (m) return { type: 'iframe', url: `https://www.youtube.com/embed/${m[1]}`, title: `YouTube ${m[1]}` };
+                        if (m) return { type: 'iframe', url: `https://www.youtube.com/embed/${m[1]}?rel=0`, title: `YouTube ${m[1]}` };
                     }
                     if (url.includes('bilibili.com')) {
                         const m = url.match(/(BV[\w]+)/i);
@@ -794,14 +1046,12 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
                     return null;
                 };
 
-                /* convert <a> tags */
                 html = html.replace(/<a\s+[^>]*href=["']([^"']+)["'][^>]*>[\s\S]*?<\/a>/gi, (match, url) => {
                     const r = classify(url);
                     if (r) { count++; return makeLink(r.url, r.title, r.type); }
                     return match;
                 });
 
-                /* convert bare URL text in <p> */
                 html = html.replace(/<p[^>]*>([\s\S]*?)<\/p>/gi, (match, inner) => {
                     const text = inner.replace(/&nbsp;/g, ' ').replace(/<br\s*\/?>/gi, '').trim();
                     if (/<[a-z]/i.test(text)) return match;
@@ -810,18 +1060,15 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
                     return match;
                 });
 
-                if (html !== orig) {
-                    await note.setContent(html);
-                    return { ok: true, count };
-                }
+                if (html !== orig) { await note.setContent(html); return { ok: true, count }; }
                 return { ok: false, count: 0 };
             }, [note.noteId]);
 
-            $icon.removeClass('tvp-loading');
+            $icon.removeClass('tvp-spin');
             if (result.ok) {
-                $icon.addClass('tvp-success');
+                $icon.addClass('tvp-ok');
                 api.showMessage(`✅ Embedded ${result.count} video link${result.count !== 1 ? 's' : ''}`);
-                setTimeout(() => { $icon.removeClass('tvp-success'); api.activateNote(note.noteId); }, 1200);
+                setTimeout(() => { $icon.removeClass('tvp-ok'); api.activateNote(note.noteId); }, 1200);
             } else if (result.error) {
                 api.showMessage('❌ ' + result.error);
             } else {
@@ -830,7 +1077,7 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
         } catch (e) {
             console.error('[VideoPreviewWidget]', e);
             api.showMessage('❌ Error: ' + e.message);
-            $('.tvp-toolbar-btn').removeClass('tvp-loading');
+            $('.tvp-toolbar-btn').removeClass('tvp-spin');
         }
     }
 
@@ -853,20 +1100,16 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
         if (cls) el.className = cls;
         return el;
     }
-
     _titleFromUrl(url) {
         try { return decodeURIComponent(url.split('/').pop().split('?')[0].split('#')[0]) || 'Video'; }
         catch { return 'Video'; }
     }
-
     _toggleFs(el) {
-        if (!document.fullscreenElement) {
-            el?.requestFullscreen().catch(() => {});
-        } else {
-            document.exitFullscreen().catch(() => {});
-        }
+        (document.fullscreenElement
+            ? document.exitFullscreen()
+            : el?.requestFullscreen()
+        )?.catch(() => {});
     }
-
     _debounce(fn, delay) {
         let t;
         return (...args) => { clearTimeout(t); t = setTimeout(() => fn.apply(this, args), delay); };

@@ -13,10 +13,10 @@ Videos are stored as annotated links in note HTML:
 <a href="https://www.youtube.com/embed/xxx#video-iframe">…</a> → <iframe> embed
 ```
 
-- **Edit mode** — links render as styled purple buttons (fully editable/deletable)
-- **Read-only mode** — widget auto-replaces them with actual players inline
+- **Edit mode** — links render as styled pill buttons (fully editable/deletable)
+- **Read-only mode** — widget auto-replaces them with inline players
 
-This means video data survives even if the plugin is removed — links remain clickable.
+Data survives plugin removal — links stay clickable even without the widget.
 
 ---
 
@@ -37,19 +37,19 @@ This means video data survives even if the plugin is removed — links remain cl
 2. Click the **🎬** button in the note toolbar
 3. Switch to read-only to see the player
 
-The button converts:
+Converts:
 - Direct video files (`.mp4`, `.webm`, `.mkv`, …) → native player
 - YouTube / Bilibili / Vimeo / Youku links → iframe embed
 
 ### Method 2 — File note (automatic)
 
-Open any Trilium note whose type is **"file"** with a `video/*` MIME type. The player appears automatically below the note — no labels needed.
+Open any Trilium note whose type is **"file"** with a `video/*` MIME type. Player appears automatically — no labels needed.
 
 ### Method 3 — Video attachments
 
 1. Attach one or more video files to a text note
 2. Add label **`#videoPlayer`** to the note
-3. A player panel appears (with a dropdown selector if multiple files)
+3. Player panel appears (with dropdown selector if multiple files)
 
 ### Method 4 — Remote URL label
 
@@ -60,29 +60,42 @@ Add label `#videoUrl=<url>` to any note — plays the URL directly.
 ## Controls (native video)
 
 | Control | Action |
-|---------|--------|
-| Big play overlay | Click to play |
-| Play / Pause | Button or **Space** |
-| Seek | Click or drag progress bar |
-| Buffered progress | Shown on seek bar |
+| --- | --- |
+| Click video | Play / Pause |
+| Double-click video | Toggle fullscreen |
+| Play / Pause button | Play / Pause (**Space**) |
+| Seek bar | Click or drag to seek |
+| Seek bar hover | Shows timestamp tooltip at cursor |
+| Buffered progress | Shown on seek bar (lighter fill) |
 | Time display | Current / total |
 | ±5 s skip | **← →** arrow keys |
+| Loop | Button or **L** |
 | Volume | Slider or **↑ ↓** keys |
 | Mute | Button or **M** |
 | Playback speed | Dropdown (0.25× – 3×) |
 | Picture-in-Picture | Button (browser support required) |
-| Fullscreen | Button, **F**, or double-click video |
+| Fullscreen | Button or **F** |
+| Download | Info bar button (native video only) |
 | Copy URL | Info bar button |
 | Open in new tab | Info bar button |
 
-> Click the player first to focus it before using keyboard shortcuts.
+> Click the player to focus it before using keyboard shortcuts.
+
+### Auto-hide controls
+
+Controls overlay fades out after **3 seconds** of inactivity while playing. Move the mouse over the player to bring them back. Controls always stay visible while paused.
+
+### Volume & position persistence
+
+- **Volume level and mute state** are saved to `localStorage` and restored across all players.
+- **Playback position** is saved per URL. If you left off more than 10 seconds in, a **Resume** bar appears on next load offering to jump back.
 
 ---
 
 ## Supported platforms
 
 | Type | Details |
-|------|---------|
+| --- | --- |
 | **Direct video** | mp4, webm, ogg, mov, mkv, avi, flv, m3u8, 3gp |
 | **YouTube** | Auto-converts to `/embed/` URL |
 | **Bilibili** | Auto-converts to `player.bilibili.com` |
@@ -96,4 +109,4 @@ Add label `#videoUrl=<url>` to any note — plays the URL directly.
 
 ## Credit
 
-Inline rendering architecture and toolbar button approach adapted from *VideoEmbedButton* (Chinese, unknown author). Custom controls, attachment support, keyboard shortcuts, PiP, buffered progress, and Trilium theme integration are original additions.
+Inline rendering architecture and toolbar button approach adapted from *VideoEmbedButton* (Chinese, unknown author). All controls, persistence, auto-hide, resume, attachment support, and styling are original additions.
