@@ -101,12 +101,21 @@ Controls overlay fades out after **3 seconds** of inactivity while playing. Move
 | **Bilibili** | Auto-converts to `player.bilibili.com` |
 | **Vimeo** | Auto-converts to `player.vimeo.com` |
 | **Youku** | Auto-converts to `player.youku.com` |
-| **Tencent Video** | iframe passthrough |
-| **TikTok / Douyin** | iframe passthrough |
+| **Tencent Video** | Auto-converts to `v.qq.com` iframe player |
+| **TikTok / Douyin** | Auto-converts to TikTok embed URLs |
+| **Twitch** | Auto-converts channels, VODs, and clips |
+| **Dailymotion** | Auto-converts to Dailymotion embed URLs |
+| **Rumble** | Auto-converts to Rumble embed URLs |
+| **Odysee** | Auto-converts to Odysee embed URLs |
+| **Niconico** | Auto-converts to Niconico embed URLs |
+| **Streamable** | Auto-converts to Streamable embed URLs |
+| **Loom** | Auto-converts shared videos to Loom embeds |
+| **Kick** | Auto-converts channels and clips |
+| **PeerTube** | Auto-converts `/videos/watch/` URLs to embeds |
 | **Any direct-link URL** | native player |
 
 ---
 
 ## Credit
 
-Inline rendering architecture and toolbar button approach adapted from *VideoEmbedButton* (Chinese, unknown author). All controls, persistence, auto-hide, resume, attachment support, and styling are original additions.
+Inline rendering architecture and toolbar button approach adapted from [trilium-fast-player](https://github.com/Userwei0418/trilium-fast-player). All controls, persistence, auto-hide, resume, attachment support, and styling are original additions.
