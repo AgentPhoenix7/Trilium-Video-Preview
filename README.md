@@ -8,7 +8,7 @@ Custom widget for [TriliumNext](https://github.com/TriliumNext/Trilium) that emb
 
 Videos are stored as annotated links in note HTML:
 
-```
+```html
 <a href="http://host/video.mp4#video-native">video.mp4</a>   → native <video> player
 <a href="https://www.youtube.com/embed/xxx#video-iframe">…</a> → <iframe> embed
 ```
@@ -38,6 +38,7 @@ Data survives plugin removal — links stay clickable even without the widget.
 3. Switch to read-only to see the player
 
 Converts:
+
 - Direct video files (`.mp4`, `.webm`, `.mkv`, …) → native player
 - YouTube / Bilibili / Vimeo / Youku links → iframe embed
 
