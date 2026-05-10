@@ -511,6 +511,13 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
             return;
         }
 
+        const videoUrl = note.getLabelValue('videoUrl');
+        if (videoUrl) {
+            this.$widget.removeClass('tvp-attach-hidden')
+                .append(this._buildNativePlayer(videoUrl, note.title, false));
+            return;
+        }
+
         if (!note.hasLabel('videoPlayer')) return;
 
         const attachments = await note.getAttachments();
@@ -544,11 +551,16 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
 
     /* ── inline video rendering ── */
     _renderInlineVideos() {
-        const container = document.querySelector(
+        const containers = document.querySelectorAll(
             '.note-detail-readonly-text-content, .note-detail-book-content, .include-note-content'
         );
-        if (!container || container.closest('.ck-editor__editable')) return;
+        containers.forEach(container => {
+            if (container.closest('.ck-editor__editable')) return;
+            this._renderInlineVideosInContainer(container);
+        });
+    }
 
+    _renderInlineVideosInContainer(container) {
         container.querySelectorAll(`a[href*="${TVP_NATIVE}"], a[href*="${TVP_IFRAME}"]`).forEach(link => {
             if (link.dataset.tvpRendered) return;
             link.dataset.tvpRendered = '1';
@@ -631,7 +643,7 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
         el.append(mediaWrap, info, resumeBar);
 
         /* ── wire events ── */
-        video.addEventListener('loadeddata',   () => el.classList.add('tvp-loaded'));
+        video.addEventListener('canplay',      () => el.classList.add('tvp-loaded'));
         video.addEventListener('error',        () => {
             el.classList.add('tvp-error');
             errMsg.textContent = video.error?.message || 'Failed to load video';
@@ -1042,6 +1054,58 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
                     if (url.includes('youku.com')) {
                         const m = url.match(/id_([^.]+)/);
                         if (m) return { type: 'iframe', url: `https://player.youku.com/embed/${m[1]}`, title: 'Youku Video' };
+                    }
+                    if (url.includes('v.qq.com')) {
+                        const m = url.match(/vid=([^&]+)/) || url.match(/\/([a-z0-9]+)\.html$/i);
+                        if (m) return { type: 'iframe', url: `https://v.qq.com/txp/iframe/player.html?vid=${m[1]}`, title: 'Tencent Video' };
+                    }
+                    if (url.includes('tiktok.com') || url.includes('douyin.com')) {
+                        const m = url.match(/video\/(\d+)/);
+                        if (m) return { type: 'iframe', url: `https://www.tiktok.com/embed/v2/${m[1]}`, title: `TikTok ${m[1]}` };
+                    }
+                    if (url.includes('twitch.tv')) {
+                        const clip = url.match(/clips\.twitch\.tv\/([^/?#]+)/) || url.match(/clip\/([^/?#]+)/);
+                        if (clip) return { type: 'iframe', url: `https://clips.twitch.tv/embed?clip=${clip[1]}&parent=localhost`, title: `Twitch Clip ${clip[1]}` };
+                        const vod = url.match(/twitch\.tv\/videos\/(\d+)/);
+                        if (vod) return { type: 'iframe', url: `https://player.twitch.tv/?video=${vod[1]}&parent=localhost`, title: `Twitch VOD ${vod[1]}` };
+                        const ch = url.match(/twitch\.tv\/([^/?#]+)/);
+                        if (ch) return { type: 'iframe', url: `https://player.twitch.tv/?channel=${ch[1]}&parent=localhost`, title: `Twitch: ${ch[1]}` };
+                    }
+                    if (url.includes('dailymotion.com') || url.includes('dai.ly')) {
+                        const m = url.match(/(?:video|dai\.ly)\/([a-z0-9]+)/i);
+                        if (m) return { type: 'iframe', url: `https://www.dailymotion.com/embed/video/${m[1]}`, title: `Dailymotion ${m[1]}` };
+                    }
+                    if (url.includes('rumble.com')) {
+                        const embed = url.match(/rumble\.com\/embed\/([^/?#]+)/);
+                        if (embed) return { type: 'iframe', url: `https://rumble.com/embed/${embed[1]}/`, title: 'Rumble Video' };
+                        const vid = url.match(/rumble\.com\/([^/?#]+)\.html/);
+                        if (vid) return { type: 'iframe', url: `https://rumble.com/embed/${vid[1]}/`, title: 'Rumble Video' };
+                    }
+                    if (url.includes('odysee.com')) {
+                        const m = url.match(/odysee\.com\/@[^/]+\/([^/?#]+)/);
+                        if (m) return { type: 'iframe', url: `https://odysee.com/$/embed/${m[1]}`, title: `Odysee: ${m[1]}` };
+                    }
+                    if (url.includes('nicovideo.jp')) {
+                        const m = url.match(/watch\/((?:sm|nm|so)\d+)/);
+                        if (m) return { type: 'iframe', url: `https://embed.nicovideo.jp/watch/${m[1]}?autoplay=0`, title: `Niconico ${m[1]}` };
+                    }
+                    if (url.includes('streamable.com')) {
+                        const m = url.match(/streamable\.com\/([a-z0-9]+)/i);
+                        if (m) return { type: 'iframe', url: `https://streamable.com/e/${m[1]}`, title: `Streamable ${m[1]}` };
+                    }
+                    if (url.includes('loom.com')) {
+                        const m = url.match(/loom\.com\/share\/([a-f0-9]+)/i);
+                        if (m) return { type: 'iframe', url: `https://www.loom.com/embed/${m[1]}`, title: `Loom ${m[1]}` };
+                    }
+                    if (url.includes('kick.com')) {
+                        const clip = url.match(/kick\.com\/[^/]+\?clip=([^&]+)/);
+                        if (clip) return { type: 'iframe', url: `https://kick.com/embed/clip/${clip[1]}`, title: `Kick Clip ${clip[1]}` };
+                        const ch = url.match(/kick\.com\/([^/?#]+)/);
+                        if (ch && ch[1] !== 'video') return { type: 'iframe', url: `https://player.kick.com/${ch[1]}`, title: `Kick: ${ch[1]}` };
+                    }
+                    if (url.includes('peertube') || url.match(/\/videos\/watch\/[a-f0-9-]{36}/)) {
+                        const m = url.match(/(https?:\/\/[^/]+)\/videos\/watch\/([a-f0-9-]{36})/);
+                        if (m) return { type: 'iframe', url: `${m[1]}/videos/embed/${m[2]}`, title: 'PeerTube Video' };
                     }
                     return null;
                 };

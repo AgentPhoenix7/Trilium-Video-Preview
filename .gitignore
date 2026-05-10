@@ -2,3 +2,5 @@
 .vscode/
 .specstory/
 .idea/
+# Ignore AGENTS.md
+AGENTS.md
