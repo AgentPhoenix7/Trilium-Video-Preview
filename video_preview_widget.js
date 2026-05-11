@@ -542,8 +542,9 @@ a[href*="#video-iframe"]::before { content: "📺\\00a0"; }
 .tvp-resume-no:hover  { background: rgba(255,255,255,.16); color: rgba(255,255,255,.9); }
 
 /* ── attachment panel ── */
-.tvp-attach-panel { contain: none; }
+.tvp-attach-panel { display: none; }   /* always hidden — dummy mount point only */
 .tvp-attach-hidden { display: none; }
+[data-tvp-panel] { display: block; margin-top: 16px; }
 .tvp-src-bar {
     display: flex; align-items: center; gap: 8px;
     padding: 8px 0 6px; flex-wrap: wrap;
@@ -560,7 +561,7 @@ a[href*="#video-iframe"]::before { content: "📺\\00a0"; }
 
 /* ── widget class ───────────────────────────────────────────────────────── */
 class VideoPreviewWidget extends api.NoteContextAwareWidget {
-    static get parentWidget() { return 'center-pane'; }
+    get parentWidget() { return 'center-pane'; }
     get position() { return 90; }
 
     /* ── render ── */
@@ -571,7 +572,8 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
             s.textContent = GLOBAL_CSS;
             document.head.appendChild(s);
         }
-        this.$widget = $('<div class="tvp-attach-panel tvp-attach-hidden" tabindex="0">');
+        this.$widget = $('<div class="tvp-attach-panel">');
+        this._attachmentVideos = [];
         return this.$widget;
     }
 
@@ -585,14 +587,32 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
         await this._refreshAttachPanel(note);
     }
 
+    /* ── DOM injection helpers ── */
+    _cleanupInjectedPanel() {
+        document.querySelectorAll('[data-tvp-panel]').forEach(el => el.remove());
+    }
+
+    _injectPanel(content) {
+        const container = document.querySelector(
+            '.note-detail-readonly-text-content, .note-detail-file-content, ' +
+            '.note-detail-printable-content, .note-detail'
+        );
+        if (!container) return;
+        const wrapper = document.createElement('div');
+        wrapper.setAttribute('data-tvp-panel', '1');
+        if (content instanceof Element) wrapper.appendChild(content);
+        else wrapper.appendChild($(content)[0]);
+        container.appendChild(wrapper);
+    }
+
     /* ── attachment / file-note panel ── */
     async _refreshAttachPanel(note) {
-        this.$widget.empty().addClass('tvp-attach-hidden');
+        this._cleanupInjectedPanel();
+        this._attachmentVideos = [];
 
         if (note.type === 'file' && isVideoMime(note.mime)) {
             const url = `/api/notes/${note.noteId}/download`;
-            this.$widget.removeClass('tvp-attach-hidden')
-                .append(this._buildNativePlayer(url, note.title, true));
+            this._injectPanel(this._buildNativePlayer(url, note.title, true));
             return;
         }
 
@@ -603,8 +623,7 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
             const player = classified.type === 'iframe'
                 ? this._buildIframePlayer(classified.url, title, detectPlatform(classified.url))
                 : this._buildNativePlayer(classified.url, title, false);
-            this.$widget.removeClass('tvp-attach-hidden')
-                .append(player);
+            this._injectPanel(player);
             return;
         }
 
@@ -614,14 +633,17 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
         const videos = attachments.filter(a => isVideoMime(a.mime) || isVideoExt(a.title));
         if (!videos.length) return;
 
-        this.$widget.removeClass('tvp-attach-hidden');
+        this._attachmentVideos = videos;
+        setTimeout(() => this._renderInlineVideos(), 0);
+
+        if (this._findAttachmentLinks(videos).length) return;
 
         if (videos.length > 1) {
             const $sel = $('<select>').append(
                 videos.map(a => $('<option>').val(`/api/attachments/${a.attachmentId}/download`).text(a.title))
             );
             const $slot = $('<div>');
-            this.$widget
+            const $wrap = $('<div>')
                 .append($('<div class="tvp-src-bar">').append($('<label>').text('Video: '), $sel))
                 .append($slot);
 
@@ -631,9 +653,10 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
             };
             $sel.on('change', load);
             load();
+            this._injectPanel($wrap[0]);
         } else {
             const a = videos[0];
-            this.$widget.append(
+            this._injectPanel(
                 this._buildNativePlayer(`/api/attachments/${a.attachmentId}/download`, a.title, true)
             );
         }
@@ -668,6 +691,45 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
             link.style.display = 'none';
             link.parentNode.insertBefore(player, link.nextSibling);
         });
+
+        (this._attachmentVideos || []).forEach(a => {
+            const url = `/api/attachments/${a.attachmentId}/download`;
+            container.querySelectorAll('a').forEach(link => {
+                if (link.dataset.tvpRendered) return;
+                if (!this._matchesAttachmentLink(link, a)) return;
+
+                link.dataset.tvpRendered = '1';
+                const player = this._buildNativePlayer(url, a.title, true);
+                this._replaceLinkWithPlayer(link, player);
+            });
+        });
+    }
+
+    _findAttachmentLinks(videos) {
+        return Array.from(document.querySelectorAll('a')).filter(link =>
+            videos.some(a => this._matchesAttachmentLink(link, a))
+        );
+    }
+
+    _matchesAttachmentLink(link, attachment) {
+        const normalize = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const href = decodeURIComponent(link.getAttribute('href') || '');
+        const text = normalize(link.textContent);
+        const title = normalize(attachment.title);
+        return href.includes(attachment.attachmentId)
+            || href.toLowerCase().includes(title)
+            || text === title
+            || text.includes(title);
+    }
+
+    _replaceLinkWithPlayer(link, player) {
+        const block = link.closest('p, div, figure, li');
+        if (block && block.textContent.trim() === link.textContent.trim()) {
+            block.replaceWith(player);
+            return;
+        }
+
+        link.replaceWith(player);
     }
 
     /* ── MutationObserver ── */

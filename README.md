@@ -46,11 +46,14 @@ Converts:
 
 Open any Trilium note whose type is **"file"** with a `video/*` MIME type. Player appears automatically — no labels needed.
 
-### Method 3 — Video attachments
+### Method 3 - Video attachments
 
 1. Attach one or more video files to a text note
 2. Add label **`#videoPlayer`** to the note
-3. Player panel appears (with dropdown selector if multiple files)
+3. Insert the attachment link where you want the player to appear
+4. In read-only mode, that link is replaced with an inline player
+
+If the note has video attachments but no matching attachment link in the body, a fallback player panel appears below the note content (with dropdown selector if multiple files).
 
 ### Method 4 — Remote URL label
 
