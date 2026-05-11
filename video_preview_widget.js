@@ -582,6 +582,7 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
         setTimeout(() => {
             this._addToolbarButton();
             this._renderInlineVideos();
+            this._renderAttachmentVideos();
             this._startObserver();
         }, 250);
         await this._refreshAttachPanel(note);
@@ -634,31 +635,33 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
         if (!videos.length) return;
 
         this._attachmentVideos = videos;
-        setTimeout(() => this._renderInlineVideos(), 0);
+        // actual rendering deferred to refreshWithNote's 250ms timeout via _renderAttachmentVideos
+    }
 
-        if (this._findAttachmentLinks(videos).length) return;
+    /* ── attachment video in-place rendering ── */
+    _renderAttachmentVideos() {
+        const videos = this._attachmentVideos;
+        if (!videos || !videos.length) return;
 
-        if (videos.length > 1) {
-            const $sel = $('<select>').append(
-                videos.map(a => $('<option>').val(`/api/attachments/${a.attachmentId}/download`).text(a.title))
-            );
-            const $slot = $('<div>');
-            const $wrap = $('<div>')
-                .append($('<div class="tvp-src-bar">').append($('<label>').text('Video: '), $sel))
-                .append($slot);
+        let anyRendered = false;
+        videos.forEach(attachment => {
+            Array.from(document.querySelectorAll('a')).forEach(link => {
+                if (link.dataset.tvpRendered) return;
+                if (!this._matchesAttachmentLink(link, attachment)) return;
+                link.dataset.tvpRendered = '1';
+                const url = `/api/attachments/${attachment.attachmentId}/download`;
+                const player = this._buildNativePlayer(url, attachment.title, true);
+                this._replaceLinkWithPlayer(link, player);
+                anyRendered = true;
+            });
+        });
 
-            const load = () => {
-                const url = $sel.val(), title = $sel.find(':selected').text();
-                $slot.empty().append(this._buildNativePlayer(url, title, true));
-            };
-            $sel.on('change', load);
-            load();
-            this._injectPanel($wrap[0]);
-        } else {
-            const a = videos[0];
-            this._injectPanel(
-                this._buildNativePlayer(`/api/attachments/${a.attachmentId}/download`, a.title, true)
-            );
+        // fallback: no links in text — inject each player at end of note content
+        if (!anyRendered) {
+            videos.forEach(attachment => {
+                const url = `/api/attachments/${attachment.attachmentId}/download`;
+                this._injectPanel(this._buildNativePlayer(url, attachment.title, true));
+            });
         }
     }
 
