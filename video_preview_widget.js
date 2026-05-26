@@ -595,8 +595,8 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
 
     _injectPanel(content) {
         const container = document.querySelector(
-            '.note-detail-readonly-text-content, .note-detail-file-content, ' +
-            '.note-detail-printable-content, .note-detail'
+            '.note-detail-readonly-text-content, .note-detail-editable-text, ' +
+            '.note-detail-file-content, .note-detail-printable-content, .note-detail'
         );
         if (!container) return;
         const wrapper = document.createElement('div');
@@ -643,26 +643,51 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
         const videos = this._attachmentVideos;
         if (!videos || !videos.length) return;
 
-        let anyRendered = false;
-        videos.forEach(attachment => {
-            Array.from(document.querySelectorAll('a')).forEach(link => {
-                if (link.dataset.tvpRendered) return;
-                if (!this._matchesAttachmentLink(link, attachment)) return;
-                link.dataset.tvpRendered = '1';
-                const url = `/api/attachments/${attachment.attachmentId}/download`;
-                const player = this._buildNativePlayer(url, attachment.title, true);
-                this._replaceLinkWithPlayer(link, player);
-                anyRendered = true;
-            });
-        });
+        // READ MODE — replace links in-place inside read-only containers
+        const readContainers = Array.from(document.querySelectorAll(
+            '.note-detail-readonly-text-content, .note-detail-book-content, .include-note-content'
+        )).filter(c => !c.closest('.ck-editor__editable'));
 
-        // fallback: no links in text — inject each player at end of note content
-        if (!anyRendered) {
+        if (readContainers.length) {
+            const allLinks = readContainers.flatMap(c => Array.from(c.querySelectorAll('a')));
+            let anyRendered = false;
             videos.forEach(attachment => {
+                allLinks.forEach(link => {
+                    if (link.dataset.tvpRendered) return;
+                    if (!this._matchesAttachmentLink(link, attachment)) return;
+                    link.dataset.tvpRendered = '1';
+                    const url = `/api/attachments/${attachment.attachmentId}/download`;
+                    this._replaceLinkWithPlayer(link, this._buildNativePlayer(url, attachment.title, true));
+                    anyRendered = true;
+                });
+            });
+            if (anyRendered) return;
+        }
+
+        // EDIT MODE — read link order from CKEditor (don't modify), inject players below editor
+        const editorEl = document.querySelector('.ck-editor__editable');
+        if (editorEl) {
+            const editorLinks = Array.from(editorEl.querySelectorAll('a'));
+            // build ordered list: match each link → attachment, preserving DOM order
+            const seen = new Set();
+            const ordered = editorLinks
+                .map(link => videos.find(a => !seen.has(a.attachmentId) && this._matchesAttachmentLink(link, a)))
+                .filter(Boolean)
+                .filter(a => { if (seen.has(a.attachmentId)) return false; seen.add(a.attachmentId); return true; });
+            // append unmatched attachments at end
+            videos.forEach(a => { if (!seen.has(a.attachmentId)) ordered.push(a); });
+            ordered.forEach(attachment => {
                 const url = `/api/attachments/${attachment.attachmentId}/download`;
                 this._injectPanel(this._buildNativePlayer(url, attachment.title, true));
             });
+            return;
         }
+
+        // FALLBACK — no editor, no read containers
+        videos.forEach(attachment => {
+            const url = `/api/attachments/${attachment.attachmentId}/download`;
+            this._injectPanel(this._buildNativePlayer(url, attachment.title, true));
+        });
     }
 
     /* ── inline video rendering ── */
@@ -715,14 +740,18 @@ class VideoPreviewWidget extends api.NoteContextAwareWidget {
     }
 
     _matchesAttachmentLink(link, attachment) {
-        const normalize = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+        const normalize = s => (s || '').replace(/[^\x20-\x7EÀ-ɏ]/g, '')
+                                        .replace(/\s+/g, ' ').trim().toLowerCase();
         const href = decodeURIComponent(link.getAttribute('href') || '');
         const text = normalize(link.textContent);
         const title = normalize(attachment.title);
+        if (!title) return false;
         return href.includes(attachment.attachmentId)
+            || href.toLowerCase().includes(encodeURIComponent(attachment.title).toLowerCase())
             || href.toLowerCase().includes(title)
             || text === title
-            || text.includes(title);
+            || text.includes(title)
+            || title.includes(text.replace(/^[\s\S]{0,4}/, '').trim()); // strip leading icon chars
     }
 
     _replaceLinkWithPlayer(link, player) {
